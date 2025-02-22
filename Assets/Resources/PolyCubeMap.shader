@@ -53,7 +53,6 @@ Shader "Custom/PolyCubeMapUnlit"
             }
 
             float4 tex2DAdjust(sampler2D tex, float4 uv) {
-                //uv.y = 1.0 - uv.y;
                 return tex2Dbias(tex, uv);
             }
 
@@ -91,25 +90,25 @@ Shader "Custom/PolyCubeMapUnlit"
                 // SWZ tmp, sub, -z,-y,-x,0;
                 float4 tmp = float4(-sub.z, -sub.y, -sub.x, 0.0);
                 // CMP sub, decoded.z, sub, tmp;
-                sub = (decoded.z > 0) ? tmp : sub;
+                sub = (decoded.z < 0) ? sub : tmp;
                 // SWZ tmp, sub, y,z,x,0;
                 tmp = float4(sub.y, sub.z, sub.x,0);
                 // CMP sub, decoded.w, sub, tmp;
-                sub = (decoded.w > 0) ? tmp : sub;
+                sub = (decoded.w < 0) ? sub : tmp;
                 // SWZ tmp, sub, y,z,x,0;
                 tmp = float4(sub.y, sub.z, sub.x, 0.0);
                 // SUB decoded.w, decoded.w, {0,0,0,0.375};
                 decoded.w = decoded.w  - 0.375; // Quickly compute 5th bit
                 // CMP sub, decoded.w, sub, tmp;
-                sub = (decoded.w > 0) ? tmp : sub;
+                sub = (decoded.w < 0) ? sub : tmp;
                 // MUL tmp, sub, {-1,-1,1,0};
                 tmp = sub * float4(-1, -1, 1,0);
                 // CMP sub, decoded.x, sub, tmp;
-                sub = (decoded.x > 0) ? tmp : sub;
+                sub = (decoded.x < 0) ? sub : tmp;
                 // MUL tmp, sub, {1,-1,-1,0};
                 tmp = sub * float4(1, -1, -1,0);
                 // CMP sub, decoded.y, sub, tmp;
-                sub = (decoded.y > 0) ? tmp : sub;
+                sub = (decoded.y < 0) ? sub : tmp;
 
                 //SUB decoded, {0.12375,0.24875,0.37375,0.49875}, map.z ; 
                 decoded = float4(0.12375, 0.24875, 0.37375, 0.49875) - map.z;
@@ -121,15 +120,15 @@ Shader "Custom/PolyCubeMapUnlit"
                 // ADD expa.z, sub.x, sub.z;
                 expa.z = sub.x + sub.z;
                 // CMP expa.w, expa.z, -sub.z, sub.x;
-                expa.w = (expa.z > 0) ? -sub.z : sub.x;
-                //ADD expa.y, expa.w, {1,1,1,1};
+                expa.w = (expa.z < 0) ? -sub.z : sub.x;
+                // ADD expa.y, expa.w, {1,1,1,1};
                 expa.y = expa.w + 1;
                 // RCP expa.y, expa.y;
                 expa.y = 1.0 / expa.y;
                 // MUL expa.x, expa.z, expa.y;
                 expa.x = expa.z * expa.y;
                 // CMP res.x, decoded.x, expa.x, res.x;
-                res.x = (decoded.x > 0) ? expa.x : res.x;
+                res.x = (decoded.x < 0) ? expa.x : res.x;
 
                 float4 try3;
                 // ADD try3.y, sub.y, -expa.w; 
@@ -137,7 +136,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 // MUL try3.y, try3.y, expa.y;
                 try3.y = try3.y * expa.y;
                 // CMP res.y, decoded.y, try3.y, res.y;
-                res.y = (decoded.y > 0) ? try3.y : res.y;
+                res.y = (decoded.y < 0) ? try3.y : res.y;
 
                 float4 try5;
                 // ADD try5.y, sub.y, expa.w;
@@ -149,7 +148,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 // MUL try5.y, try5.y, try5.z;
                 try5.y = try5.y*  try5.z;
                 //CMP res.y, decoded.z, try5.y, res.y;
-                res.y = (decoded.z > 0) ? try5.y : res.y;
+                res.y = (decoded.z < 0) ? try5.y : res.y;
 
 
                 float4 expb;
@@ -158,12 +157,12 @@ Shader "Custom/PolyCubeMapUnlit"
                 float4 try1;
                 //SWZ expb, sub, z,-x,y,1;
                 expb = float4(sub.z, -sub.x, sub.y, 1.0);
-                //ADD expb, expb, sub.y; 
+                // ADD expb, expb, sub.y; 
                 expb = expb + float4(sub.y, sub.y, sub.y, sub.y);
-                //RCP expb.w, expb.w;
+                // RCP expb.w, expb.w;
                 expb.w = 1.0 / expb.w;
                 // CMP tma, expa.z, {0,-1,0,0}, {1, 0,0,0};
-                tma = (expa.z > 0) ? float4(0, -1, 0, 0) : float4(1, 0, 0, 0);
+                tma = (expa.z < 0) ? float4(0, -1, 0, 0) : float4(1, 0, 0, 0);
                 // MUL tma, expa.x, tma;
                 tma = expa.x * tma;
                 // MAD tma, tma, expb.z, -expb.z;
@@ -173,16 +172,16 @@ Shader "Custom/PolyCubeMapUnlit"
                 // MUL tryA, tryA, {-1,1,1,1}; 
                 tryA = tryA * float4(-1, 1, 1, 1);
                 // CMP try, decoded.z, tryA, expb;
-                try1 = (decoded.z > 0) ? tryA : expb;
+                try1 = (decoded.z < 0) ? tryA : expb;
                 // CMP tmp, try.y, {3,0,0,0}, {1,-1,0,0};
-                tmp = (try1.y > 0) ? float4(3, 0, 0, 0) : float4(1, -1, 0, 0);
+                tmp = (try1.y < 0) ?  float4(3, 0, 0, 0) : float4(1, -1, 0, 0);
 
                 //MAD try, try, expb.w, tmp;
                 try1 = try1 * expb.w + tmp;
                 // CMP try, decoded.y, try, res;
-                try1 = (decoded.y > 0) ? try1 : res;
+                try1 = (decoded.y < 0) ?  try1 : res;
                 // CMP res, res.y, res, try;
-                res = (res.y > 0) ? res : try1;
+                res = (res.y < 0) ? res : try1;
 
                 // MAD res, res, text_coord_normalizer_on_TS_0, text_coord_normalizer_on_TS_1;
                 res = res * text_coord_normalizer_on_TS_0 + text_coord_normalizer_on_TS_1;

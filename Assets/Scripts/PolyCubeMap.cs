@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 public class PolyCubeMap : MonoBehaviour
@@ -5,19 +6,23 @@ public class PolyCubeMap : MonoBehaviour
     public Texture2D PolyCubemapTexture;
     public int SquareletSize = 16;
 
+    public bool ShowParametrization;
+
     private void Start()
     {
         if (PolyCubemapTexture != null)
         {
-            //Uncomment to see the parametrization mesh
-            //var meshFilter = GetComponent<MeshFilter>();
-            //if (meshFilter != null)
-            //{
-            //    var uvs = new List<Vector3>();
-            //    meshFilter.mesh.GetUVs(0, uvs);
-            //    meshFilter.mesh.SetVertices(uvs);
-            //    meshFilter.mesh.UploadMeshData(false);
-            //}
+            if (ShowParametrization)
+            {
+                var meshFilter = GetComponent<MeshFilter>();
+                if (meshFilter != null)
+                {
+                    var uvs = new List<Vector3>();
+                    meshFilter.mesh.GetUVs(0, uvs);
+                    meshFilter.mesh.SetVertices(uvs);
+                    meshFilter.mesh.UploadMeshData(false);
+                }
+            }
             var meshRenderer = GetComponent<MeshRenderer>();
             if (meshRenderer != null)
             {
