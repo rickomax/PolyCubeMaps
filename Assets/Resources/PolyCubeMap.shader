@@ -53,7 +53,6 @@ Shader "Custom/PolyCubeMapUnlit"
             }
 
             float4 tex2DAdjust(sampler2D tex, float4 uv) {
-                //uv.y = 1.0 - uv.y;
                 return tex2Dbias(tex, uv);
             }
 
