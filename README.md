@@ -1,2 +1,5 @@
 Unity implementation of PolyCubeMaps:<br>
 https://vcg.isti.cnr.it/polycubemaps/
+
+![image](https://github.com/user-attachments/assets/7084ffa8-8936-48a3-a27c-22bcc4439e57)
+
