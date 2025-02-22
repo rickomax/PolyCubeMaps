@@ -121,7 +121,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 expa.z = sub.x + sub.z;
                 // CMP expa.w, expa.z, -sub.z, sub.x;
                 expa.w = (expa.z < 0) ? -sub.z : sub.x;
-                //ADD expa.y, expa.w, {1,1,1,1};
+                // ADD expa.y, expa.w, {1,1,1,1};
                 expa.y = expa.w + 1;
                 // RCP expa.y, expa.y;
                 expa.y = 1.0 / expa.y;
@@ -150,15 +150,16 @@ Shader "Custom/PolyCubeMapUnlit"
                 //CMP res.y, decoded.z, try5.y, res.y;
                 res.y = (decoded.z < 0) ? try5.y : res.y;
 
+
                 float4 expb;
                 float4 tma;
                 float4 tryA;
                 float4 try1;
                 //SWZ expb, sub, z,-x,y,1;
                 expb = float4(sub.z, -sub.x, sub.y, 1.0);
-                //ADD expb, expb, sub.y; 
+                // ADD expb, expb, sub.y; 
                 expb = expb + float4(sub.y, sub.y, sub.y, sub.y);
-                //RCP expb.w, expb.w;
+                // RCP expb.w, expb.w;
                 expb.w = 1.0 / expb.w;
                 // CMP tma, expa.z, {0,-1,0,0}, {1, 0,0,0};
                 tma = (expa.z < 0) ? float4(0, -1, 0, 0) : float4(1, 0, 0, 0);
@@ -180,7 +181,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 // CMP try, decoded.y, try, res;
                 try1 = (decoded.y < 0) ?  try1 : res;
                 // CMP res, res.y, res, try;
-                res = (res.y < 0) ? try1 : res;
+                res = (res.y < 0) ? res : try1;
 
                 // MAD res, res, text_coord_normalizer_on_TS_0, text_coord_normalizer_on_TS_1;
                 res = res * text_coord_normalizer_on_TS_0 + text_coord_normalizer_on_TS_1;
