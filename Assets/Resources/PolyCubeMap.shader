@@ -36,7 +36,6 @@ Shader "Custom/PolyCubeMapUnlit"
             };
 
             sampler2D _MainTex;
-            float4 _MainTex_ST;
 
             // Environment parameters (equivalent to program.env[])
             float4 text_coord_normalizer;                // {1/TEXT_SIZE_X, 1/TEXT_SIZE_Y, 0, 0}
