@@ -109,7 +109,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 // CMP sub, decoded.y, sub, tmp;
                 sub = (decoded.y < 0) ? sub : tmp;
 
-                //SUB decoded, {0.12375,0.24875,0.37375,0.49875}, map.z ; 
+                // SUB decoded, {0.12375,0.24875,0.37375,0.49875}, map.z ; 
                 decoded = float4(0.12375, 0.24875, 0.37375, 0.49875) - map.z;
 
                 // MOV res, sub;
@@ -146,7 +146,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 try5.z = 1.0 / try5.z;
                 // MUL try5.y, try5.y, try5.z;
                 try5.y = try5.y*  try5.z;
-                //CMP res.y, decoded.z, try5.y, res.y;
+                // CMP res.y, decoded.z, try5.y, res.y;
                 res.y = (decoded.z < 0) ? try5.y : res.y;
 
                 float4 expb;
@@ -165,7 +165,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 tma = expa.x * tma;
                 // MAD tma, tma, expb.z, -expb.z;
                 tma = tma * expb.z - expb.z;
-                //ADD tryA, expb, tma;   
+                // ADD tryA, expb, tma;   
                 tryA = expb + tma;
                 // MUL tryA, tryA, {-1,1,1,1}; 
                 tryA = tryA * float4(-1, 1, 1, 1);
@@ -174,7 +174,7 @@ Shader "Custom/PolyCubeMapUnlit"
                 // CMP tmp, try.y, {3,0,0,0}, {1,-1,0,0};
                 tmp = (try1.y < 0) ?  float4(3, 0, 0, 0) : float4(1, -1, 0, 0);
 
-                //MAD try, try, expb.w, tmp;
+                // MAD try, try, expb.w, tmp;
                 try1 = try1 * expb.w + tmp;
                 // CMP try, decoded.y, try, res;
                 try1 = (decoded.y < 0) ?  try1 : res;
