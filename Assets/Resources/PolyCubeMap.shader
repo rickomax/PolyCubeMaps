@@ -150,7 +150,6 @@ Shader "Custom/PolyCubeMapUnlit"
                 //CMP res.y, decoded.z, try5.y, res.y;
                 res.y = (decoded.z < 0) ? try5.y : res.y;
 
-
                 float4 expb;
                 float4 tma;
                 float4 tryA;
