@@ -943,6 +943,576 @@ public static class PolyCubeMapBaker
         }
     }
 
+    // ----------------------------------------------------------------------
+    // 8) Voxelization + arbitrary-mesh baking (new).
+    //
+    // These additions let a user pick any Unity mesh + an optional Texture2D
+    // and bake a PolyCubeMap from it. The voxelization is a deliberately
+    // simple triangle-sampling + flood-fill scheme that is good enough for
+    // small demo meshes but is NOT what you'd ship: the production-quality
+    // construction is the Fu/Bai/Liu 2016 polycube algorithm, see
+    // Material/paper.pdf and the C++ in Material/*.cpp.
+    // ----------------------------------------------------------------------
+
+    // Shader constraint: LUT pixel is `cellX + 16 * cellZ`, so cellX must be
+    // < 16. Vertex coords go up to resolution+1, so max safe resolution is 14.
+    private const int MaxResolution = 14;
+    private const int MinResolution = 2;
+
+    public static PolyCube Voxelize(Mesh mesh, int resolution, bool fillInterior)
+    {
+        if (resolution > MaxResolution)
+        {
+            Debug.LogError($"PolyCubeMapBaker.Voxelize: resolution {resolution} exceeds shader cap " +
+                           $"({MaxResolution}); clamping. The shader's `cellX + 16*cellZ` LUT packing " +
+                           "collides for cellX >= 16.");
+            resolution = MaxResolution;
+        }
+        if (resolution < MinResolution)
+        {
+            Debug.LogError($"PolyCubeMapBaker.Voxelize: resolution {resolution} below minimum " +
+                           $"({MinResolution}); clamping.");
+            resolution = MinResolution;
+        }
+
+        Vector3[] verts;
+        int[] tris;
+        try
+        {
+            verts = mesh.vertices;
+            tris = mesh.triangles;
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"PolyCubeMapBaker.Voxelize: cannot read mesh '{mesh.name}' " +
+                           "(is Read/Write enabled in the importer?). " + e.Message);
+            return new PolyCube();
+        }
+        if (tris.Length == 0)
+        {
+            Debug.LogError("PolyCubeMapBaker.Voxelize: mesh has no triangles.");
+            return new PolyCube();
+        }
+
+        var b = mesh.bounds;
+        var size = b.size;
+        var longest = Mathf.Max(size.x, Mathf.Max(size.y, size.z));
+        if (longest <= 1e-8f)
+        {
+            Debug.LogError("PolyCubeMapBaker.Voxelize: mesh has zero extent.");
+            return new PolyCube();
+        }
+        var voxelSize = longest / resolution;
+
+        // Whole grid extents per axis (not padded to a cube).
+        var nx = Mathf.Max(1, Mathf.CeilToInt(size.x / voxelSize));
+        var ny = Mathf.Max(1, Mathf.CeilToInt(size.y / voxelSize));
+        var nz = Mathf.Max(1, Mathf.CeilToInt(size.z / voxelSize));
+        // The longest axis should land exactly on `resolution`; the rounding
+        // above guards against tiny FP slop.
+        nx = Mathf.Min(nx, MaxResolution);
+        ny = Mathf.Min(ny, MaxResolution);
+        nz = Mathf.Min(nz, MaxResolution);
+
+        var origin = b.min;
+        var shell = new bool[nx, ny, nz];
+
+        Vector3Int ToVoxel(Vector3 p)
+        {
+            var local = (p - origin) / voxelSize;
+            return new Vector3Int(
+                Mathf.Clamp(Mathf.FloorToInt(local.x), 0, nx - 1),
+                Mathf.Clamp(Mathf.FloorToInt(local.y), 0, ny - 1),
+                Mathf.Clamp(Mathf.FloorToInt(local.z), 0, nz - 1));
+        }
+
+        // Triangle sampling: pick a step count from the longest edge so we
+        // hit every voxel the triangle crosses (factor 0.4 < 0.5 to over-
+        // sample slightly and avoid hairline gaps).
+        for (var i = 0; i < tris.Length; i += 3)
+        {
+            var v0 = verts[tris[i]];
+            var v1 = verts[tris[i + 1]];
+            var v2 = verts[tris[i + 2]];
+            var e0 = (v1 - v0).magnitude;
+            var e1 = (v2 - v1).magnitude;
+            var e2 = (v0 - v2).magnitude;
+            var maxEdge = Mathf.Max(e0, Mathf.Max(e1, e2));
+            var steps = Mathf.Max(1, Mathf.CeilToInt(maxEdge / (voxelSize * 0.4f)));
+            for (var su = 0; su <= steps; su++)
+            {
+                var u = (float)su / steps;
+                for (var sv = 0; sv <= steps - su; sv++)
+                {
+                    var w = (float)sv / steps;
+                    var p = v0 + (v1 - v0) * u + (v2 - v0) * w;
+                    var vox = ToVoxel(p);
+                    shell[vox.x, vox.y, vox.z] = true;
+                }
+            }
+        }
+
+        var cubes = new List<Vector3Int>();
+
+        if (fillInterior)
+        {
+            // 3D BFS flood from (-1,-1,-1) over the bbox padded by 1 in every
+            // direction. A voxel inside the bbox that is neither shell nor
+            // reached by the flood is interior. Will leak on open meshes --
+            // we cannot detect that cheaply, so we just log a hint when the
+            // interior count looks suspicious.
+            var pnx = nx + 2; var pny = ny + 2; var pnz = nz + 2;
+            var visited = new bool[pnx, pny, pnz];
+            // Use packed int to avoid Vector3Int alloc pressure in the queue.
+            var q = new Queue<int>();
+            int Pack(int x, int y, int z) => (x * pny + y) * pnz + z;
+            visited[0, 0, 0] = true;
+            q.Enqueue(Pack(0, 0, 0));
+            var dirs = new[]
+            {
+                new Vector3Int(1, 0, 0), new Vector3Int(-1, 0, 0),
+                new Vector3Int(0, 1, 0), new Vector3Int(0, -1, 0),
+                new Vector3Int(0, 0, 1), new Vector3Int(0, 0, -1),
+            };
+            while (q.Count > 0)
+            {
+                var packed = q.Dequeue();
+                var z = packed % pnz;
+                var y = (packed / pnz) % pny;
+                var x = packed / (pnz * pny);
+                foreach (var d in dirs)
+                {
+                    var px = x + d.x; var py = y + d.y; var pz = z + d.z;
+                    if (px < 0 || py < 0 || pz < 0 || px >= pnx || py >= pny || pz >= pnz) continue;
+                    if (visited[px, py, pz]) continue;
+                    // Bbox-local coords (subtract the 1-pad).
+                    var lx = px - 1; var ly = py - 1; var lz = pz - 1;
+                    var inBbox = lx >= 0 && ly >= 0 && lz >= 0 && lx < nx && ly < ny && lz < nz;
+                    if (inBbox && shell[lx, ly, lz]) continue; // blocked by shell
+                    visited[px, py, pz] = true;
+                    q.Enqueue(Pack(px, py, pz));
+                }
+            }
+            for (var x = 0; x < nx; x++)
+            for (var y = 0; y < ny; y++)
+            for (var z = 0; z < nz; z++)
+            {
+                if (shell[x, y, z] || !visited[x + 1, y + 1, z + 1])
+                    cubes.Add(new Vector3Int(x, y, z));
+            }
+            // Heuristic leak hint: if every voxel ended up filled, the flood
+            // probably leaked through an open mesh hole.
+            if (cubes.Count == nx * ny * nz)
+                Debug.LogWarning("PolyCubeMapBaker.Voxelize: fillInterior produced a fully-solid grid; " +
+                                 "the mesh may not be watertight (interior flood leaked).");
+        }
+        else
+        {
+            for (var x = 0; x < nx; x++)
+            for (var y = 0; y < ny; y++)
+            for (var z = 0; z < nz; z++)
+                if (shell[x, y, z]) cubes.Add(new Vector3Int(x, y, z));
+        }
+
+        if (cubes.Count == 0)
+        {
+            Debug.LogWarning("PolyCubeMapBaker.Voxelize: no cubes produced; mesh too thin for grid?");
+        }
+
+        return new PolyCube(cubes);
+    }
+
+    public static (Texture2D tex, Dictionary<Vector3Int, PatchInfo> patches)
+        BakeTextureFromMesh(PolyCube polycube, Mesh mesh, Vector3[] uvs3, Texture2D sourceTexture,
+                            int squareletSize, int textureWidth, int textureHeight)
+    {
+        // If no source, fall back to the existing checkerboard baker.
+        if (sourceTexture == null)
+            return BakeTexture(polycube, squareletSize, textureWidth, textureHeight);
+
+        // Attempt to read the source texture; if Read/Write is off, the call
+        // throws and we fall back to the checkerboard with a warning.
+        Color32[] srcCol = null;
+        int sw = 0, sh = 0;
+        try
+        {
+            srcCol = sourceTexture.GetPixels32();
+            sw = sourceTexture.width;
+            sh = sourceTexture.height;
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"PolyCubeMapBaker.BakeTextureFromMesh: cannot read source texture " +
+                             $"'{sourceTexture.name}' (Read/Write disabled?): {e.Message}. " +
+                             "Falling back to checkerboard fill.");
+            return BakeTexture(polycube, squareletSize, textureWidth, textureHeight);
+        }
+
+        var meshUV = new List<Vector2>();
+        mesh.GetUVs(0, meshUV);
+        if (meshUV.Count != mesh.vertexCount)
+        {
+            Debug.LogWarning($"PolyCubeMapBaker.BakeTextureFromMesh: mesh '{mesh.name}' has " +
+                             $"{meshUV.Count} UVs vs {mesh.vertexCount} vertices; falling back to " +
+                             "checkerboard.");
+            return BakeTexture(polycube, squareletSize, textureWidth, textureHeight);
+        }
+
+        var meshTris = mesh.triangles;
+        var meshVerts = mesh.vertices;
+        if (meshTris.Length == 0)
+        {
+            Debug.LogWarning("PolyCubeMapBaker.BakeTextureFromMesh: mesh has no triangles; " +
+                             "falling back to checkerboard.");
+            return BakeTexture(polycube, squareletSize, textureWidth, textureHeight);
+        }
+
+        // For huge meshes, skip the per-pixel triangle scan and fall back to
+        // a vertex-only nearest search (much faster, slightly worse quality).
+        var triCount = meshTris.Length / 3;
+        var vertexOnlySampling = triCount > 20000;
+        if (vertexOnlySampling)
+            Debug.LogWarning($"PolyCubeMapBaker.BakeTextureFromMesh: mesh has {triCount} triangles " +
+                             "(>20000); using vertex-only nearest sampling for speed.");
+
+        // Build inverse warp: polycube-space p -> mesh-space q.
+        // Forward: warped = (q - meshCenter) * scale + pcCenter
+        // Inverse: q = (warped - pcCenter) / scale + meshCenter
+        var meshBounds = mesh.bounds;
+        var pcBounds = polycube.VertexBounds();
+        var meshSize = meshBounds.size;
+        var pcSize = pcBounds.size;
+        var scale = Mathf.Min(
+            pcSize.x / Mathf.Max(meshSize.x, 1e-8f),
+            Mathf.Min(pcSize.y / Mathf.Max(meshSize.y, 1e-8f),
+                      pcSize.z / Mathf.Max(meshSize.z, 1e-8f)));
+        var invScale = 1f / Mathf.Max(scale, 1e-12f);
+
+        Vector3 PolycubeToMesh(Vector3 p) => (p - pcBounds.center) * invScale + meshBounds.center;
+
+        // Set up the atlas.
+        var tex = new Texture2D(textureWidth, textureHeight, TextureFormat.RGBA32, false);
+        tex.filterMode = FilterMode.Point;
+        tex.wrapMode = TextureWrapMode.Clamp;
+        var atlas = new Color32[textureWidth * textureHeight];
+        var magenta = new Color32(255, 0, 255, 255);
+        for (var i = 0; i < atlas.Length; i++) atlas[i] = magenta;
+
+        var patches = new Dictionary<Vector3Int, PatchInfo>();
+        var pcVerts = polycube.EnumerateVertices();
+        var maxCellX = 0; var maxCellY = 0; var maxCellZ = 0;
+        foreach (var v in pcVerts)
+        {
+            if (v.x > maxCellX) maxCellX = v.x;
+            if (v.y > maxCellY) maxCellY = v.y;
+            if (v.z > maxCellZ) maxCellZ = v.z;
+        }
+        var lutMaxPxX = maxCellX + 16 * maxCellZ;
+        var lutMaxPxY = maxCellY;
+        if (lutMaxPxX >= textureWidth || lutMaxPxY >= textureHeight)
+            throw new InvalidOperationException(
+                $"LUT footprint ({lutMaxPxX + 1}x{lutMaxPxY + 1}) does not fit in texture " +
+                $"({textureWidth}x{textureHeight}). Increase texture size.");
+        var lutReservedRows = ((lutMaxPxY + 1) + squareletSize - 1) / squareletSize * squareletSize;
+
+        var patchPxW = PATCH_SQUARELETS_W * squareletSize;
+        var patchPxH = PATCH_SQUARELETS_H * squareletSize;
+        var patchesPerRow = Mathf.Max(1, textureWidth / patchPxW);
+
+        var sortedVerts = new List<Vector3Int>(pcVerts);
+        sortedVerts.Sort((a, b) =>
+        {
+            if (a.z != b.z) return a.z.CompareTo(b.z);
+            if (a.y != b.y) return a.y.CompareTo(b.y);
+            return a.x.CompareTo(b.x);
+        });
+
+        var assignedCount = 0;
+        var typeCounts = new Dictionary<CellType, int>();
+
+        foreach (var v in sortedVerts)
+        {
+            byte mask = 0;
+            for (var dz = 0; dz <= 1; dz++)
+            for (var dy = 0; dy <= 1; dy++)
+            for (var dx = 0; dx <= 1; dx++)
+            {
+                var c = new Vector3Int(v.x + dx - 1, v.y + dy - 1, v.z + dz - 1);
+                if (polycube.ContainsCube(c)) mask |= (byte)(1 << (dx + 2 * dy + 4 * dz));
+            }
+
+            var (type, sym) = ClassifyVertex(mask);
+            if (!typeCounts.ContainsKey(type)) typeCounts[type] = 0;
+            typeCounts[type]++;
+
+            if (type == CellType.Empty) continue;
+            if (type == CellType.Unsupported)
+            {
+                Debug.LogWarning($"PolyCubeMapBaker: vertex {v} has unsupported configuration " +
+                                 $"(mask=0x{mask:X2}). Treating as empty.");
+                continue;
+            }
+
+            if (!SymToRotBits.TryGetValue(sym, out var rotBits))
+            {
+                Debug.LogWarning($"PolyCubeMapBaker: symmetry for {v} not reachable by 5-bit ops.");
+                rotBits = 0;
+            }
+            var encoded = EncodeByte(type, rotBits);
+            var invSym = Inverse(sym);
+
+            var slot = assignedCount;
+            var patchCol = slot % patchesPerRow;
+            var patchRow = slot / patchesPerRow;
+            var patchPxX = patchCol * patchPxW;
+            var patchPxY = lutReservedRows + patchRow * patchPxH;
+            if (patchPxY + patchPxH > textureHeight)
+                throw new InvalidOperationException(
+                    "Ran out of texture space while packing patches; enlarge texture.");
+            assignedCount++;
+
+            // LUT byte: write directly into our backing atlas array.
+            var lutX = v.x + 16 * v.z;
+            var lutY = v.y;
+            var lutR = (byte)(patchPxX / squareletSize);
+            var lutG = (byte)(patchPxY / squareletSize);
+            atlas[lutY * textureWidth + lutX] = new Color32(lutR, lutG, encoded, 255);
+
+            // Fill each of the 6 squarelets. Uniform projection scheme:
+            // squarelet (sx, sy) in [0..2]x[0..1] covers polycube-space offset
+            //   ((sx-1) + px/(S-1)) * 0.5  on X
+            //   ((sy-1) + py/(S-1)) * 0.5  on Y
+            //   0                          on Z
+            // from the cell center, then rotated by inv(sym) into world frame.
+            // This is a deliberate simplification -- the shader's per-case
+            // squarelet-to-facelet mapping is more nuanced, but for the
+            // supported types the facelets the shader actually samples land
+            // in roughly the right spots. The unused squarelets will be wrong
+            // and won't be sampled.
+            var center = (Vector3)v;
+            for (var sy = 0; sy < PATCH_SQUARELETS_H; sy++)
+            for (var sx = 0; sx < PATCH_SQUARELETS_W; sx++)
+            {
+                for (var py = 0; py < squareletSize; py++)
+                {
+                    for (var px = 0; px < squareletSize; px++)
+                    {
+                        // Map pixel within squarelet to local 2D offset.
+                        var fx = squareletSize > 1 ? (float)px / (squareletSize - 1) : 0.5f;
+                        var fy = squareletSize > 1 ? (float)py / (squareletSize - 1) : 0.5f;
+                        var local = new Vector3(((sx - 1) + fx) * 0.5f,
+                                                ((sy - 1) + fy) * 0.5f,
+                                                0f);
+                        var pPoly = center + invSym.Apply(local);
+                        var pMesh = PolycubeToMesh(pPoly);
+
+                        Vector2 uv;
+                        if (vertexOnlySampling)
+                            uv = NearestVertexUV(pMesh, meshVerts, meshUV);
+                        else
+                            uv = NearestTriangleUV(pMesh, meshVerts, meshTris, meshUV);
+
+                        var su = Mathf.Clamp01(uv.x);
+                        var sv = Mathf.Clamp01(uv.y);
+                        var ix = Mathf.Clamp(Mathf.FloorToInt(su * sw), 0, sw - 1);
+                        var iy = Mathf.Clamp(Mathf.FloorToInt(sv * sh), 0, sh - 1);
+                        var col = srcCol[iy * sw + ix];
+
+                        var atlasX = patchPxX + sx * squareletSize + px;
+                        var atlasY = patchPxY + sy * squareletSize + py;
+                        atlas[atlasY * textureWidth + atlasX] = col;
+                    }
+                }
+            }
+
+            patches[v] = new PatchInfo
+            {
+                Cell = v,
+                Type = type,
+                RotBits = rotBits,
+                EncodedByte = encoded,
+                PatchPxX = patchPxX,
+                PatchPxY = patchPxY,
+                PatchSquareletsW = PATCH_SQUARELETS_W,
+                PatchSquareletsH = PATCH_SQUARELETS_H,
+            };
+        }
+
+        tex.SetPixels32(atlas);
+        tex.Apply(false, false);
+
+        Debug.Log($"PolyCubeMapBaker: baked-from-mesh {assignedCount} patch(es). " +
+                  $"Type counts: " + FormatTypeCounts(typeCounts) +
+                  $". Texture: {textureWidth}x{textureHeight}, squareletSize={squareletSize}, " +
+                  $"patchPxSize={patchPxW}x{patchPxH}, patches/row={patchesPerRow}.");
+
+        return (tex, patches);
+    }
+
+    // Nearest-vertex fallback (used when the mesh is too big for per-triangle).
+    private static Vector2 NearestVertexUV(Vector3 p, Vector3[] verts, List<Vector2> uvs)
+    {
+        var bestD2 = float.PositiveInfinity;
+        var bestUV = Vector2.zero;
+        for (var i = 0; i < verts.Length; i++)
+        {
+            var d2 = (verts[i] - p).sqrMagnitude;
+            if (d2 < bestD2) { bestD2 = d2; bestUV = uvs[i]; }
+        }
+        return bestUV;
+    }
+
+    // Closest point on the triangle soup, interpolated UV at that point.
+    private static Vector2 NearestTriangleUV(Vector3 p, Vector3[] verts, int[] tris, List<Vector2> uvs)
+    {
+        var bestD2 = float.PositiveInfinity;
+        var bestUV = Vector2.zero;
+        for (var t = 0; t < tris.Length; t += 3)
+        {
+            var ia = tris[t]; var ib = tris[t + 1]; var ic = tris[t + 2];
+            var a = verts[ia]; var b = verts[ib]; var c = verts[ic];
+            ClosestPointOnTriangle(p, a, b, c, out var q, out var u, out var v, out var w);
+            var d2 = (q - p).sqrMagnitude;
+            if (d2 < bestD2)
+            {
+                bestD2 = d2;
+                bestUV = uvs[ia] * u + uvs[ib] * v + uvs[ic] * w;
+            }
+        }
+        return bestUV;
+    }
+
+    // Closest-point-on-triangle (Ericson "Real-Time Collision Detection", §5.1.5).
+    // Returns the point + barycentric coordinates (u for a, v for b, w for c).
+    private static void ClosestPointOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c,
+                                               out Vector3 q, out float u, out float v, out float w)
+    {
+        var ab = b - a;
+        var ac = c - a;
+        var ap = p - a;
+        var d1 = Vector3.Dot(ab, ap);
+        var d2 = Vector3.Dot(ac, ap);
+        if (d1 <= 0f && d2 <= 0f) { q = a; u = 1f; v = 0f; w = 0f; return; }
+
+        var bp = p - b;
+        var d3 = Vector3.Dot(ab, bp);
+        var d4 = Vector3.Dot(ac, bp);
+        if (d3 >= 0f && d4 <= d3) { q = b; u = 0f; v = 1f; w = 0f; return; }
+
+        var vc = d1 * d4 - d3 * d2;
+        if (vc <= 0f && d1 >= 0f && d3 <= 0f)
+        {
+            var t = d1 / (d1 - d3);
+            q = a + t * ab; u = 1f - t; v = t; w = 0f; return;
+        }
+
+        var cp = p - c;
+        var d5 = Vector3.Dot(ab, cp);
+        var d6 = Vector3.Dot(ac, cp);
+        if (d6 >= 0f && d5 <= d6) { q = c; u = 0f; v = 0f; w = 1f; return; }
+
+        var vb = d5 * d2 - d1 * d6;
+        if (vb <= 0f && d2 >= 0f && d6 <= 0f)
+        {
+            var t = d2 / (d2 - d6);
+            q = a + t * ac; u = 1f - t; v = 0f; w = t; return;
+        }
+
+        var va = d3 * d6 - d5 * d4;
+        if (va <= 0f && (d4 - d3) >= 0f && (d5 - d6) >= 0f)
+        {
+            var t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            q = b + t * (c - b); u = 0f; v = 1f - t; w = t; return;
+        }
+
+        var denom = 1f / (va + vb + vc);
+        v = vb * denom;
+        w = vc * denom;
+        u = 1f - v - w;
+        q = a + ab * v + ac * w;
+    }
+
+    // Full pipeline used by the menu / window.
+    public static GameObject BakeFromMesh(Mesh mesh, Texture2D sourceTexture, int resolution,
+                                          bool fillInterior, int squareletSize,
+                                          int textureWidth, int textureHeight, string outputBaseName)
+    {
+        if (mesh == null)
+        {
+            Debug.LogError("PolyCubeMapBaker.BakeFromMesh: mesh is null.");
+            return null;
+        }
+        if (string.IsNullOrWhiteSpace(outputBaseName)) outputBaseName = mesh.name + "_pcm";
+
+        var pc = Voxelize(mesh, resolution, fillInterior);
+        if (pc.Cubes.Count == 0)
+        {
+            Debug.LogError("PolyCubeMapBaker.BakeFromMesh: voxelization produced no cubes; aborting.");
+            return null;
+        }
+
+        // Compute 3D UVs from the polycube and a copy of the mesh (so we
+        // don't stomp the user's source mesh asset).
+        var bakedMesh = UnityEngine.Object.Instantiate(mesh);
+        bakedMesh.name = outputBaseName;
+        var uvs3 = ComputeTextureCoordinates(bakedMesh, pc);
+        bakedMesh.SetUVs(0, new List<Vector3>(uvs3));
+        bakedMesh.UploadMeshData(false);
+
+        var (tex, patches) = sourceTexture != null
+            ? BakeTextureFromMesh(pc, mesh, uvs3, sourceTexture, squareletSize, textureWidth, textureHeight)
+            : BakeTexture(pc, squareletSize, textureWidth, textureHeight);
+
+        if (!Directory.Exists(OutputDir)) Directory.CreateDirectory(OutputDir);
+        AssetDatabase.Refresh();
+
+        var meshPath = OutputDir + "/" + outputBaseName + ".asset";
+        var existingMesh = AssetDatabase.LoadAssetAtPath<Mesh>(meshPath);
+        if (existingMesh != null) AssetDatabase.DeleteAsset(meshPath);
+        AssetDatabase.CreateAsset(bakedMesh, meshPath);
+
+        var pngPath = OutputDir + "/" + outputBaseName + "_texture.png";
+        var bytes = tex.EncodeToPNG();
+        File.WriteAllBytes(pngPath, bytes);
+        AssetDatabase.ImportAsset(pngPath);
+
+        var importer = (TextureImporter)AssetImporter.GetAtPath(pngPath);
+        if (importer != null)
+        {
+            importer.filterMode = FilterMode.Point;
+            importer.mipmapEnabled = false;
+            importer.textureCompression = TextureImporterCompression.Uncompressed;
+            importer.alphaIsTransparency = false;
+            importer.npotScale = TextureImporterNPOTScale.None;
+            importer.sRGBTexture = false;
+            importer.SaveAndReimport();
+        }
+        AssetDatabase.SaveAssets();
+
+        var savedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(meshPath);
+        var savedTex = AssetDatabase.LoadAssetAtPath<Texture2D>(pngPath);
+        var mat = AssetDatabase.LoadAssetAtPath<Material>("Assets/Resources/PolyCubeMap.mat");
+
+        var goName = outputBaseName;
+        var existing = GameObject.Find(goName);
+        if (existing != null) UnityEngine.Object.DestroyImmediate(existing);
+        var go = new GameObject(goName);
+        var mf = go.AddComponent<MeshFilter>();
+        mf.sharedMesh = savedMesh;
+        var mr = go.AddComponent<MeshRenderer>();
+        if (mat != null) mr.sharedMaterial = mat;
+        else Debug.LogWarning("PolyCubeMapBaker: PolyCubeMap.mat not found at Assets/Resources/PolyCubeMap.mat.");
+        var pcm = go.AddComponent<PolyCubeMap>();
+        pcm.PolyCubemapTexture = savedTex;
+        pcm.SquareletSize = squareletSize;
+
+        Selection.activeGameObject = go;
+        Debug.Log($"PolyCubeMapBaker.BakeFromMesh: '{goName}' baked from mesh '{mesh.name}' " +
+                  $"({pc.Cubes.Count} cubes, {patches.Count} patches, res={resolution}, " +
+                  $"fillInterior={fillInterior}, src={(sourceTexture != null ? sourceTexture.name : "none")}).");
+        return go;
+    }
+
     private static void RunSelfTests()
     {
         // (a) Byte roundtrip: decoding then re-encoding (in the same case)

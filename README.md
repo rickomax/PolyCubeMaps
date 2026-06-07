@@ -37,3 +37,35 @@ Each menu item:
 Cell types 6a/6b and the iterative parameterization optimization are
 intentionally unimplemented — they match the limits of the runtime
 shader and are flagged with `TODO` comments and warnings in the baker.
+
+### From Mesh… (arbitrary mesh + optional texture)
+
+A third menu item, **PolyCubeMap → Bake → From Mesh…**, opens an editor
+window that lets you bake a PolyCubeMap from any Unity `Mesh` plus an
+optional source `Texture2D`. The pipeline:
+
+1. **Voxelize** the mesh on a `resolution × resolution × resolution`
+   grid (longest mesh-AABB axis maps to `resolution`). Shell voxels are
+   marked by barycentric-stepping every triangle at sub-voxel density;
+   if "Fill interior" is on, a 3D BFS flood from outside the bounding
+   box marks every voxel it cannot reach as interior. The polycube is
+   `shell ∪ interior`. Resolution is hard-capped at 14 because the
+   shader packs the LUT as `cellX + 16 * cellZ`.
+2. **3D UVs** are computed exactly as for the sample meshes (warp +
+   closest-point on the polycube surface).
+3. **Bake the atlas**. If a source texture is provided (and is
+   Read/Write enabled), each atlas pixel inside a patch is back-projected
+   into mesh space, snapped to the nearest mesh-surface point, and
+   sampled from the source via the interpolated UV0. Otherwise the
+   existing HSV checkerboard fill is used. Meshes with more than 20k
+   triangles fall back to a vertex-only nearest search for speed.
+4. The resulting mesh + PNG land in `Assets/Samples/Generated/`, and a
+   wired-up `GameObject` is spawned and selected in the scene.
+
+This voxelization is a deliberately simple demo — for production-quality
+polycube construction, see the Fu/Bai/Liu 2016 algorithm in
+[`Material/paper.pdf`](Material/paper.pdf) and the reference C++ in
+`Material/*.cpp`. The squarelet-to-facelet projection used by the
+texture sampler is also a single uniform scheme rather than the exact
+per-case packing the shader assumes, so patches will look approximately
+right on the four supported types but not pixel-perfect.
