@@ -682,6 +682,10 @@ public static class PolyCubeMapBaker
             };
         }
 
+        FillEmptyLUTEntries(
+            (x, y, c) => tex.SetPixels32(x, y, 1, 1, new[] { c }),
+            patches, maxCellX, maxCellY, maxCellZ, squareletSize);
+
         tex.Apply(false, false);
 
         // Brief utilization summary.
@@ -696,6 +700,55 @@ public static class PolyCubeMapBaker
     private static int Popcount(byte b)
     {
         var n = 0; for (var i = 0; i < 8; i++) if ((b & (1 << i)) != 0) n++; return n;
+    }
+
+    // For voxelized / multi-cube polycubes, many cells in the LUT footprint
+    // have no patch (interior vertices with mask=0xFF, empty exterior cells,
+    // or unsupported 6a/6b configurations). Their LUT pixels would stay
+    // magenta and fragments that land there in the shader produce visible
+    // pink/garbage because the pink-as-bytes patch offset reads way off-atlas.
+    //
+    // Mitigation: copy the nearest non-empty cell's LUT entry into each
+    // unwritten cell. The projection in that cell will then sample a nearby
+    // patch -- not pixel-perfect, but no magenta. The proper fix (per paper
+    // §3.2) is for the shader to project off-surface fragments back to T3,
+    // which our runtime shader doesn't implement.
+    private static void FillEmptyLUTEntries(
+        System.Action<int, int, Color32> writePixel,
+        Dictionary<Vector3Int, PatchInfo> patches,
+        int maxCellX, int maxCellY, int maxCellZ,
+        int squareletSize)
+    {
+        if (patches.Count == 0) return;
+        var patchKeys = new List<Vector3Int>(patches.Keys);
+        var filled = 0;
+        for (var cz = 0; cz <= maxCellZ; cz++)
+        for (var cy = 0; cy <= maxCellY; cy++)
+        for (var cx = 0; cx <= maxCellX; cx++)
+        {
+            var key = new Vector3Int(cx, cy, cz);
+            if (patches.ContainsKey(key)) continue;
+
+            var bestD2 = int.MaxValue;
+            PatchInfo bestPatch = null;
+            foreach (var k in patchKeys)
+            {
+                var dx = k.x - cx; var dy = k.y - cy; var dz = k.z - cz;
+                var d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 < bestD2) { bestD2 = d2; bestPatch = patches[k]; }
+            }
+            if (bestPatch == null) continue;
+
+            var lutX = cx + 16 * cz;
+            var lutY = cy;
+            var lutR = (byte)(bestPatch.PatchPxX / squareletSize);
+            var lutG = (byte)(bestPatch.PatchPxY / squareletSize);
+            writePixel(lutX, lutY, new Color32(lutR, lutG, bestPatch.EncodedByte, 255));
+            filled++;
+        }
+        if (filled > 0)
+            Debug.Log($"PolyCubeMapBaker: filled {filled} empty LUT cell(s) with nearest non-empty patch " +
+                      "(off-surface fragments now sample an approximate neighbor instead of magenta).");
     }
 
     private static string FormatTypeCounts(Dictionary<CellType, int> d)
@@ -1337,6 +1390,10 @@ public static class PolyCubeMapBaker
                 PatchSquareletsH = PATCH_SQUARELETS_H,
             };
         }
+
+        FillEmptyLUTEntries(
+            (x, y, c) => atlas[y * textureWidth + x] = c,
+            patches, maxCellX, maxCellY, maxCellZ, squareletSize);
 
         tex.SetPixels32(atlas);
         tex.Apply(false, false);
